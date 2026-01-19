@@ -1,0 +1,31 @@
+import requests
+import pandas as pd
+
+API_KEY = "68a71f83365a2ee0b4554dd0a50539c3"
+
+city = "Vellore,IN"
+url = f"http://api.openweathermap.org/data/2.5/forecast?q={city}&appid={API_KEY}&units=metric"
+
+response = requests.get(url)
+data = response.json()
+
+# 🔹 Print the raw API response before looping
+print("API Response:", data)
+
+if "list" in data:
+    weather_list = []
+    for entry in data["list"]:
+        weather_list.append({
+            "datetime": entry["dt_txt"],
+            "temperature": entry["main"]["temp"],
+            "humidity": entry["main"]["humidity"],
+            "wind_speed": entry["wind"]["speed"],
+            "weather": entry["weather"][0]["description"]
+        })
+
+    df_weather = pd.DataFrame(weather_list)
+    df_weather.to_csv("../data/raw/weather/vellore_weather_raw.csv", index=False)
+    print("✅ Saved weather data")
+    display(df_weather.head())
+else:
+    print("❌ No 'list' found. Full response above ↑")
