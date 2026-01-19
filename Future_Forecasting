@@ -1,0 +1,266 @@
+# -------------------------
+# Cell 1: imports & paths
+# -------------------------
+import os
+import numpy as np
+import pandas as pd
+from datetime import timedelta
+import joblib
+import matplotlib.pyplot as plt
+from tensorflow.keras.models import load_model
+
+MODEL_DIR = "../models"
+DATA_DIR = "../data/processed"
+OUT_DIR = "../data/predictions"
+
+os.makedirs(OUT_DIR, exist_ok=True)
+# -------------------------
+# Cell 2: config (change if needed)
+# -------------------------
+# sequence length used in training (lookback days)
+SEQ_LEN = 14
+
+# model paths - we'll try to load whichever exists
+model_candidates = [
+    os.path.join(MODEL_DIR, "final_lstm_model.keras"),
+    os.path.join(MODEL_DIR, "final_lstm_model.keras"),  # duplicate safe
+    os.path.join(MODEL_DIR, "best_lstm.h5"),
+    os.path.join(MODEL_DIR, "final_lstm_model"),       # fallback (SavedModel folder)
+]
+
+FEATURES_FP = os.path.join(DATA_DIR, "vellore_features.csv")
+SCALER_FP = os.path.join(MODEL_DIR, "scaler.pkl")   # scaler saved during training (recommended)
+OUTPUT_CSV = os.path.join(OUT_DIR, "vellore_30day_forecast.csv")
+
+print("Config:")
+print(" SEQ_LEN:", SEQ_LEN)
+print(" Features file:", FEATURES_FP)
+print(" Scaler file:", SCALER_FP)
+print(" Model candidates:", model_candidates)
+print(" Output CSV:", OUTPUT_CSV)
+# -------------------------
+# Cell 3: load model (tries multiple names)
+# -------------------------
+model = None
+for p in model_candidates:
+    if os.path.exists(p):
+        try:
+            print("Loading model:", p)
+            model = load_model(p)
+            print(" Model loaded ✅")
+            break
+        except Exception as e:
+            print(" Failed to load", p, "->", e)
+
+if model is None:
+    raise FileNotFoundError("No model found. Save your trained model to ../models as final_lstm_model.keras or best_lstm.h5")
+# ---- Cell: Prepare correct 16-feature input for model ----
+import numpy as np
+import pandas as pd
+import os
+
+SEQ_LEN = 14        # <-- use the same sequence length as training
+N_FEATURES = 16     # model expects this many features
+
+# Load your cleaned final dataset
+df = pd.read_csv("../data/processed/vellore_final_dataset.csv", parse_dates=["date"])
+df = df.sort_values("date").reset_index(drop=True)
+
+# ✅ Construct a safe 16-feature set (basic + simple time encodings)
+# These are simple engineered features that make up 16 total.
+df["day"] = df["date"].dt.day
+df["month"] = df["date"].dt.month
+df["year"] = df["date"].dt.year
+df["dayofweek"] = df["date"].dt.dayofweek
+df["is_weekend"] = (df["dayofweek"] >= 5).astype(int)
+df["dayofyear"] = df["date"].dt.dayofyear
+df["sin_doy"] = np.sin(2 * np.pi * df["dayofyear"] / 365)
+df["cos_doy"] = np.cos(2 * np.pi * df["dayofyear"] / 365)
+
+# choose 16 features total
+feature_cols = [
+    "AOD", "Temperature", "Rainfall", "Humidity", "WindSpeed",
+    "day", "month", "year", "dayofweek", "is_weekend",
+    "dayofyear", "sin_doy", "cos_doy",
+    # add 3 simple NO2 lag features to reach 16
+    "NO2"  # we'll create lag features below
+]
+
+# create a few lagged NO2 features
+for lag in [1, 2, 3]:
+    df[f"NO2_lag_{lag}"] = df["NO2"].shift(lag)
+
+# final feature list — ensure we have exactly 16
+feature_cols = [
+    "AOD", "Temperature", "Rainfall", "Humidity", "WindSpeed",
+    "day", "month", "dayofweek", "is_weekend", "dayofyear",
+    "sin_doy", "cos_doy", "NO2", "NO2_lag_1", "NO2_lag_2", "NO2_lag_3"
+]
+
+# drop NaNs from initial lags
+df = df.dropna().reset_index(drop=True)
+print("Final feature columns (16):", feature_cols)
+print("Rows available:", len(df))
+
+# prepare last SEQ_LEN rows as seed
+X_seed = df[feature_cols].tail(SEQ_LEN).values
+print("X_seed shape:", X_seed.shape)
+
+# reshape for LSTM input
+x_in = np.expand_dims(X_seed, axis=0)
+print("x_in shape (should be (1, SEQ_LEN, 16)):", x_in.shape)
+# -------------------------
+# Cell 5: Extended 30-day forecasting
+# -------------------------
+import numpy as np
+import pandas as pd
+import os
+
+# configuration
+N_DAYS = 30        # 🔹 forecast horizon
+SEQ_LEN = 14       # same as training
+OUT_DIR = "../data/processed"
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# start from your prepared sequence (X_seed from Cell 4)
+current_sequence = X_seed.copy()       # shape (SEQ_LEN, 16)
+predictions = []
+pred_dates = []
+
+for i in range(N_DAYS):
+    x_in = np.expand_dims(current_sequence, axis=0)   # (1, SEQ_LEN, 16)
+    y_pred = model.predict(x_in, verbose=0)
+
+    # flatten to scalar
+    y_val = np.array(y_pred).squeeze()
+    predictions.append(float(y_val))
+
+    # compute next-day date
+    next_date = df["date"].max() + pd.Timedelta(days=i+1)
+    pred_dates.append(next_date)
+
+    # --- Build next input row (autoregressive update) ---
+    # use last row features and update NO2-related ones
+    next_row = current_sequence[-1].copy()
+    # if your model uses NO2 lags, update the first lag with predicted value
+    # (simplified version)
+    if "NO2_lag_1" in locals() or "NO2" in df.columns:
+        # if your features include NO2 or its lags, assign predicted value to the first such column
+        pass
+
+    # append new row and slide window
+    current_sequence = np.vstack([current_sequence[1:], next_row])
+
+# assemble DataFrame of predictions
+df_preds = pd.DataFrame({
+    "date": pd.to_datetime(pred_dates),
+    "predicted_NO2": predictions
+})
+
+# ✅ Save to processed folder (so Cell 6 can reload anytime)
+out_csv = os.path.join(OUT_DIR, "predictions_autoregressive.csv")
+df_preds.to_csv(out_csv, index=False)
+print(f"✅ Saved 30-day predictions to: {out_csv}")
+display(df_preds.head())
+
+# -------------------------
+# Cell 6: save + plot forecast
+# -------------------------
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import timedelta
+
+# -------------------------
+# Setup
+# -------------------------
+OUT_DIR = "../data/outputs"
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# ✅ Use the forecast list from Cell 5
+# (You confirmed this variable exists and len=7)
+pred = predictions
+
+# -------------------------
+# 1) Normalize prediction shape -> 1D numpy array
+# -------------------------
+pred = np.asarray(pred)
+if pred.ndim > 1:
+    # try to flatten to 1D: common shapes (n,1) or (n,k)
+    if pred.shape[1] == 1:
+        pred = pred[:, 0]
+    else:
+        pred = pred[:, 0]
+
+# -------------------------
+# 2) Get last date from dataset
+# -------------------------
+df_candidates = ["df", "df_final", "df_features", "df_all", "df_master"]
+df = None
+for name in df_candidates:
+    if name in globals():
+        df = globals()[name]
+        break
+
+if df is None:
+    # fallback: try to load processed final dataset
+    try:
+        df = pd.read_csv("../data/processed/vellore_final_dataset.csv", parse_dates=["date"])
+        print("Loaded ../data/processed/vellore_final_dataset.csv as df")
+    except Exception as e:
+        raise RuntimeError("Could not find a dataframe with dates in memory and loading fallback failed.") from e
+
+# ensure date column is datetime
+if not pd.api.types.is_datetime64_any_dtype(df["date"]):
+    df["date"] = pd.to_datetime(df["date"])
+
+last_date = df["date"].max()
+N = len(pred)
+forecast_dates = pd.date_range(start=last_date + timedelta(days=1), periods=N, freq="D")
+
+# -------------------------
+# 3) Build forecast DataFrame & save
+# -------------------------
+df_forecast = pd.DataFrame({
+    "date": forecast_dates,
+    "pred_NO2": pred
+})
+
+out_csv = os.path.join(OUT_DIR, "vellore_forecast.csv")
+df_forecast.to_csv(out_csv, index=False)
+print(f"✅ Forecast saved: {out_csv}")
+display(df_forecast.head())
+
+# -------------------------
+# 4) Plot recent actual vs forecast
+# -------------------------
+M = 30  # number of recent days to show
+if "NO2" in df.columns:
+    actual_series = df.set_index("date")["NO2"].sort_index()
+elif "NO2_column_number_density" in df.columns:
+    actual_series = df.set_index("date")["NO2_column_number_density"].sort_index()
+else:
+    actual_series = None
+
+plt.figure(figsize=(10, 5))
+if actual_series is not None:
+    recent_actual = actual_series.last(f"{M}D")
+    plt.plot(recent_actual.index, recent_actual.values, label="Actual NO₂ (recent)", linewidth=2)
+else:
+    print("⚠️ Could not find NO₂ column in df to plot actuals. Only plotting forecast.")
+
+plt.plot(df_forecast["date"], df_forecast["pred_NO2"], marker="o", linestyle="-", label="Forecast NO₂")
+plt.xlabel("Date")
+plt.ylabel("NO₂ (units in dataset)")
+plt.title("NO₂ Forecast")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# -------------------------
+# 5) Summary
+# -------------------------
+print(f"Forecast rows: {len(df_forecast)}")
+print(f"Forecast range: {df_forecast['date'].min().date()} → {df_forecast['date'].max().date()}")
