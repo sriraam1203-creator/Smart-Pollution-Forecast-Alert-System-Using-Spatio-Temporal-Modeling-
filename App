@@ -1,0 +1,185 @@
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# =========================
+# CONFIG
+# =========================
+st.set_page_config(
+    page_title="Smart Pollution Forecast & Alert System",
+    layout="wide"
+)
+
+# =========================
+# FILE PATHS (MATCH YOUR FOLDERS)
+# =========================
+HIST_PM_PATH = "data/raw/satellite/vellore_pm_from_aod.csv"
+FORECAST_PATH = "data/outputs/vellore_forecast_multi_optionA.csv"
+
+# =========================
+# LOAD DATA
+# =========================
+try:
+    # Historical PM2.5 (satellite-derived)
+    df_hist = pd.read_csv(HIST_PM_PATH)
+    df_hist["date"] = pd.to_datetime(df_hist["date"])
+
+    # Forecast data (LSTM output)
+    df_pred = pd.read_csv(FORECAST_PATH)
+    df_pred["date"] = pd.to_datetime(df_pred["date"])
+
+except Exception as e:
+    st.error("❌ Failed to load data files")
+    st.exception(e)
+    st.stop()
+
+# =========================
+# SIDEBAR FILTERS
+# =========================
+st.sidebar.title("📅 Date Filter")
+
+min_date = min(df_hist["date"].min(), df_pred["date"].min())
+max_date = max(df_hist["date"].max(), df_pred["date"].max())
+
+start_date = st.sidebar.date_input("Start Date", min_date.date())
+end_date = st.sidebar.date_input("End Date", max_date.date())
+
+
+
+df_pred = df_pred[
+    (df_pred["date"].dt.date >= start_date) &
+    (df_pred["date"].dt.date <= end_date)
+]
+
+# =========================
+# HEADER
+# =========================
+st.title("🌍 Smart Pollution Forecast & Alert System")
+st.caption("Satellite-derived historical data with LSTM-based pollution forecasting")
+
+st.markdown("---")
+
+# =========================
+# ALERT LOGIC (PM2.5 BASED)
+# =========================
+def get_alert_level(pm25):
+    if pm25 <= 30:
+        return "SAFE ✅"
+    elif pm25 <= 60:
+        return "MODERATE ⚠️"
+    elif pm25 <= 90:
+        return "UNHEALTHY ❌"
+    else:
+        return "SEVERE 🚨"
+
+def get_alert_message(level):
+    if level == "SAFE ✅":
+        return "Air quality is safe for outdoor activities"
+    elif level == "MODERATE ⚠️":
+        return "Sensitive groups should limit prolonged exposure"
+    elif level == "UNHEALTHY ❌":
+        return "Avoid outdoor activities if possible"
+    else:
+        return "Health warning: stay indoors"
+
+df_pred["Alert_Level"] = df_pred["PM2_5"].apply(get_alert_level)
+df_pred["Alert_Message"] = df_pred["Alert_Level"].apply(get_alert_message)
+
+# =========================
+# ALERT SUMMARY (FORECAST)
+# =========================
+st.subheader("🚨 Forecast Alert Summary")
+
+c1, c2, c3 = st.columns(3)
+c1.metric("✅ Safe Days", (df_pred["Alert_Level"] == "SAFE ✅").sum())
+c2.metric("⚠️ Moderate Days", (df_pred["Alert_Level"] == "MODERATE ⚠️").sum())
+c3.metric(
+    "🚨 Unhealthy Days",
+    df_pred["Alert_Level"].isin(["UNHEALTHY ❌", "SEVERE 🚨"]).sum()
+)
+
+st.markdown("---")
+
+# =========================
+# PM2.5 CONTINUITY GRAPH (KEY GRAPH)
+# =========================
+st.subheader("📈 PM2.5 Continuity: Historical → Forecast")
+
+fig, ax = plt.subplots(figsize=(11, 4))
+
+# Historical PM2.5
+ax.plot(
+    df_hist["date"],
+    df_hist["PM2_5"],
+    label="Historical PM2.5 (Satellite-derived)",
+    marker="o"
+)
+
+# Forecast PM2.5
+df_hist = df_hist[df_hist["date"] < df_pred["date"].min()]
+
+
+ax.plot(
+    df_pred["date"],
+    df_pred["PM2_5"],
+    label="Forecast PM2.5 (LSTM)",
+    marker="o"
+)
+
+# Prediction start marker
+if not df_pred.empty:
+    ax.axvline(
+        x=df_pred["date"].min(),
+        linestyle="--",
+        color="gray",
+        label="Prediction Start"
+    )
+
+ax.set_xlabel("Date")
+ax.set_ylabel("PM2.5 (µg/m³)")
+ax.set_title("Historical to Forecast PM2.5 Continuity")
+ax.legend()
+ax.grid(True)
+
+st.pyplot(fig)
+
+st.markdown("---")
+
+# =========================
+# FORECASTED POLLUTION LEVELS
+# =========================
+st.subheader("📊 Forecasted Pollution Levels")
+
+fig2, ax2 = plt.subplots(figsize=(11, 4))
+
+ax2.plot(df_pred["date"], df_pred["PM2_5"], label="PM2.5", marker="o")
+ax2.plot(df_pred["date"], df_pred["PM10"], label="PM10", marker="o")
+
+ax2.set_xlabel("Date")
+ax2.set_ylabel("Concentration (µg/m³)")
+ax2.legend()
+ax2.grid(True)
+
+st.pyplot(fig2)
+
+st.markdown("---")
+
+# =========================
+# DAILY ALERT TABLE
+# =========================
+st.subheader("📋 Daily Forecast Alerts")
+
+display_cols = ["date", "PM2_5", "PM10", "Alert_Level", "Alert_Message"]
+
+st.dataframe(
+    df_pred[display_cols]
+    .sort_values("date")
+    .reset_index(drop=True),
+    use_container_width=True
+)
+
+# =========================
+# FOOTER
+# =========================
+st.markdown("---")
+st.caption("📌 Built as part of the *Smart Pollution Forecast & Alert System* capstone project")
