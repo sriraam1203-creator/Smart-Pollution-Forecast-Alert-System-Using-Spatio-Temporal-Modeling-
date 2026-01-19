@@ -1,0 +1,38 @@
+import cdsapi
+import os
+
+c = cdsapi.Client(
+    url="https://cds.climate.copernicus.eu/api/v2",
+)
+
+
+OUT_FILE = "../data/raw/cams/vellore_cams_pm.nc"
+os.makedirs(os.path.dirname(OUT_FILE), exist_ok=True)
+
+# Vellore bounding box (N, W, S, E)
+area = [
+    13.1665,  # North
+    78.8825,  # West
+    12.6665,  # South
+    79.3825,  # East
+]
+
+print("Requesting CAMS PM & AOD data...")
+
+c.retrieve(
+    "cams-global-reanalysis-eac4",
+    {
+        "variable": [
+            "particulate_matter_2.5um",
+            "particulate_matter_10um",
+            "aerosol_optical_depth_550nm",
+        ],
+        "date": "2025-03-01/2025-09-30",
+        "time": "12:00",
+        "area": area,
+        "format": "netcdf",
+    },
+    OUT_FILE
+)
+
+print("✅ Download complete:", OUT_FILE)
