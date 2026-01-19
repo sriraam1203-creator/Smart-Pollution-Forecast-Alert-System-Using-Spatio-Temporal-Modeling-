@@ -1,0 +1,426 @@
+import ee
+import pandas as pd
+
+# Authenticate & Initialize EE
+try:
+    ee.Initialize()
+except:
+    ee.Authenticate()
+    ee.Initialize()
+
+# Vellore point (lon, lat)
+POINT = ee.Geometry.Point([79.1325, 12.9165])
+
+# Date range
+start = '2025-03-01'
+end   = '2025-09-23'
+
+# Generic function to extract daily mean values for any band + collection
+def extract_daily_mean(collection_id, band, start_date, end_date, buffer_m=5000, scale=7000):
+    col = (ee.ImageCollection(collection_id)
+           .select(band)
+           .filterDate(start_date, end_date)
+           .filterBounds(POINT))
+    
+    # Convert each image to a feature containing date + band value
+    def img_to_feature(img):
+        stats = img.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=POINT.buffer(buffer_m),
+            scale=scale,
+            maxPixels=1e9
+        )
+        return ee.Feature(None, {
+            'date': img.date().format('YYYY-MM-dd'),
+            band: stats.get(band)
+        })
+
+    features = col.map(img_to_feature).filter(ee.Filter.notNull([band]))
+    features_list = features.getInfo().get('features', [])
+
+    rows = []
+    for f in features_list:
+        props = f['properties']
+        rows.append(props)
+
+    df = pd.DataFrame(rows)
+    
+    if not df.empty:
+        df = df.drop_duplicates(subset=['date']).sort_values('date').reset_index(drop=True)
+
+    return df
+
+print("✅ Setup complete — now you can extract NO2, SO2, CO, O3, AOD, etc.")
+# --- Extract MODIS AOD (land @ 550 nm) and save ---
+import ee, pandas as pd
+POINT = ee.Geometry.Point([79.1325, 12.9165])
+
+collection_id_aod = 'MODIS/061/MOD08_M3'
+band_aod = 'Aerosol_Optical_Depth_Land_Mean_Mean_550'   # chosen band from your list
+
+start = '2025-03-01'
+end   = '2025-09-23'
+
+def extract_monthly_aod(collection_id, band, start_date, end_date, buffer_m=20000, scale=1000):
+    col = ee.ImageCollection(collection_id).select(band).filterDate(start_date, end_date).filterBounds(POINT)
+    def img_to_feature(img):
+        stats = img.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=POINT.buffer(buffer_m),
+            scale=scale,
+            maxPixels=1e9
+        )
+        return ee.Feature(None, {
+            'date': img.date().format('YYYY-MM-dd'),
+            band: stats.get(band)
+        })
+    features = col.map(img_to_feature).filter(ee.Filter.notNull([band]))
+    features_list = features.getInfo().get('features', [])
+    rows = [f['properties'] for f in features_list]
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.drop_duplicates(subset=['date']).sort_values('date').reset_index(drop=True)
+    return df
+
+df_aod = extract_monthly_aod(collection_id_aod, band_aod, start, end, buffer_m=20000, scale=1000)
+print("AOD rows:", len(df_aod))
+display(df_aod)
+
+# Save CSV
+df_aod.to_csv("../data/raw/satellite/vellore_aod.csv", index=False)
+print("✅ Saved:", "../data/raw/satellite/vellore_aod.csv")
+import ee
+POINT = ee.Geometry.Point([79.1325, 12.9165])
+col = ee.ImageCollection('MODIS/061/MOD08_M3').filterDate('2025-03-01','2025-09-23').filterBounds(POINT)
+print("Collection size:", col.size().getInfo())
+img = ee.Image(col.first())
+info = img.getInfo()
+print("id:", info.get('id'))
+print("bands:", [b['id'] for b in info.get('bands', [])][:40])  # first 40 bands printed
+import pandas as pd
+
+# File paths
+no2_path = "../data/raw/satellite/vellore_no2.csv"
+aod_path = "../data/raw/satellite/vellore_aod.csv"
+out_path = "../data/processed/vellore_satellite_master.csv"
+
+# Load datasets
+df_no2 = pd.read_csv(no2_path, parse_dates=['date'])
+df_aod = pd.read_csv(aod_path, parse_dates=['date'])
+
+# Extract month-year keys
+df_no2['month'] = df_no2['date'].dt.to_period('M').astype(str)
+df_aod['month'] = df_aod['date'].dt.to_period('M').astype(str)
+
+# Rename AOD column for clarity
+df_aod = df_aod.rename(columns={'Aerosol_Optical_Depth_Land_Mean_Mean_550': 'AOD_550'})
+
+# Merge: left join (keeps all NO2 rows)
+df_master = df_no2.merge(df_aod[['month', 'AOD_550']], on='month', how='left')
+
+# Drop helper column
+df_master = df_master.drop(columns=['month'])
+
+# Save final dataset
+df_master.to_csv(out_path, index=False)
+print("✅ Master file saved successfully!")
+print("Rows:", len(df_master))
+display(df_master.head())
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load master dataset
+df = pd.read_csv("../data/processed/vellore_satellite_master.csv", parse_dates=['date'])
+
+# Basic info
+print("Data points:", len(df))
+print(df.describe())
+
+# ----- Time-Series Visualization -----
+plt.figure(figsize=(12,5))
+plt.plot(df['date'], df['NO2_column_number_density'], label='NO₂ Concentration', linewidth=2)
+plt.ylabel('NO₂ column density')
+plt.title('Daily NO₂ Levels in Vellore (2025)')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+plt.figure(figsize=(12,5))
+plt.plot(df['date'], df['AOD_550'], color='orange', label='AOD (550 nm)', linewidth=2)
+plt.ylabel('Aerosol Optical Depth (AOD 550 nm)')
+plt.title('Monthly AOD over Vellore (2025)')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# ----- Correlation -----
+corr = df['NO2_column_number_density'].corr(df['AOD_550'])
+print(f"📊 Correlation between NO₂ and AOD: {corr:.3f}")
+# Sentinel-5P SO2 extraction
+collection_id_so2 = 'COPERNICUS/S5P/OFFL/L3_SO2'
+band_so2 = 'SO2_column_number_density'
+
+df_so2 = extract_daily_mean(
+    collection_id_so2, 
+    band_so2, 
+    start, 
+    end, 
+    buffer_m=5000, 
+    scale=1000
+)
+
+print("SO2 rows:", len(df_so2))
+display(df_so2.head())
+
+df_so2.to_csv("../data/raw/satellite/vellore_so2.csv", index=False)
+print("Saved: ../data/raw/satellite/vellore_so2.csv")
+collection_id_so2 = 'COPERNICUS/S5P/OFFL/L3_SO2'
+band_so2 = 'SO2_column_number_density'
+
+df_so2 = extract_daily_mean(collection_id_so2, band_so2, start, end)
+
+print("SO2 rows:", len(df_so2))
+display(df_so2.head())
+
+df_so2.to_csv("../data/raw/satellite/vellore_so2.csv", index=False)
+print("Saved:", "../data/raw/satellite/vellore_so2.csv")
+# Sentinel-5P CO extraction
+collection_id_co = 'COPERNICUS/S5P/OFFL/L3_CO'
+band_co = 'CO_column_number_density'
+
+df_co = extract_daily_mean(
+    collection_id_co,
+    band_co,
+    start,
+    end,
+    buffer_m=5000,   # 5 km radius around point
+    scale=7000       # CO is a coarse-resolution product, 7 km scale is ideal
+)
+
+print("CO rows:", len(df_co))
+display(df_co.head())
+
+# Save CSV
+df_co.to_csv("../data/raw/satellite/vellore_co.csv", index=False)
+print("Saved:", "../data/raw/satellite/vellore_co.csv")
+# Sentinel-5P O3 extraction
+collection_id_o3 = 'COPERNICUS/S5P/OFFL/L3_O3'
+band_o3 = 'O3_column_number_density'
+
+df_o3 = extract_daily_mean(
+    collection_id_o3,
+    band_o3,
+    start,
+    end,
+    buffer_m=5000,  # 5 km buffer
+    scale=7000      # reasonable scale for TROPOMI ozone product
+)
+
+print("O3 rows:", len(df_o3))
+display(df_o3.head())
+
+# Save CSV
+df_o3.to_csv("../data/raw/satellite/vellore_o3.csv", index=False)
+print("Saved:", "../data/raw/satellite/vellore_o3.csv")
+# 1) Generate PM2.5/PM10 from your AOD file, convert units if needed, then merge all satellite pollutant CSVs + weather
+import os, pandas as pd, numpy as np
+from datetime import datetime
+
+# ---------- Paths (adjust if your files are elsewhere) ----------
+AOD_CSV = "../data/raw/satellite/vellore_aod.csv"           # your AOD file (you already have)
+NO2_CSV = "../data/raw/satellite/vellore_no2.csv"          # sentinel-5p NO2
+SO2_CSV = "../data/raw/satellite/vellore_so2.csv"          # sentinel-5p SO2
+CO_CSV  = "../data/raw/satellite/vellore_co.csv"           # sentinel-5p CO
+O3_CSV  = "../data/raw/satellite/vellore_o3.csv"           # sentinel-5p O3
+WEATHER_CSV = "../data/raw/weather/vellore_weather_raw.csv" # openweather (3-hourly)
+OUT_PM_FROM_AOD = "../data/raw/satellite/vellore_pm_from_aod.csv"
+OUT_MERGED = "../data/processed/vellore_final_dataset.csv"
+os.makedirs(os.path.dirname(OUT_MERGED), exist_ok=True)
+
+# ---------- 1. Load AOD and normalize ----------
+if not os.path.exists(AOD_CSV):
+    raise FileNotFoundError(f"AOD file not found: {AOD_CSV}")
+
+df_aod = pd.read_csv(AOD_CSV, parse_dates=["date"])
+# find numeric column for AOD if different names
+aod_col = None
+for c in df_aod.columns:
+    if c.lower().startswith("opt") or "aod" in c.lower() or "optical" in c.lower():
+        aod_col = c
+        break
+if aod_col is None:
+    # fallback: pick first numeric column other than date
+    numcols = df_aod.select_dtypes(include=[float,int]).columns.tolist()
+    numcols = [c for c in numcols if c!="index"]
+    if not numcols:
+        raise RuntimeError("Could not auto-detect AOD column in the AOD CSV")
+    aod_col = numcols[0]
+
+# rename to AOD
+df_aod = df_aod.rename(columns={aod_col: "AOD_raw"})
+# detect scaling: if mean > 50 treat as multiplied by 1000
+mean_aod = df_aod["AOD_raw"].dropna().mean()
+if mean_aod > 50:
+    scale_detected = 1000.0
+else:
+    scale_detected = 1.0
+df_aod["AOD"] = df_aod["AOD_raw"] / scale_detected
+
+print(f"AOD column used: {aod_col} | mean_raw={mean_aod:.3f} | scale_applied=1/{scale_detected}")
+
+# ---------- 2. Convert AOD -> PM2.5 & PM10 using empirical formula ----------
+# (India-style empirical coefficients; adjust if you have a preferred model)
+df_aod["PM2_5"] = df_aod["AOD"] * 85.0 + 12.0
+df_aod["PM10"]  = df_aod["AOD"] * 130.0 + 20.0
+
+# save PM-from-AOD CSV
+df_aod_out = df_aod[["date","AOD","PM2_5","PM10"]].copy()
+df_aod_out.to_csv(OUT_PM_FROM_AOD, index=False)
+print("Saved PM from AOD to:", OUT_PM_FROM_AOD)
+display(df_aod_out.head(10))
+
+# ---------- 3. Load other satellite pollutant files if present ----------
+def load_if_exists(path, date_col="date"):
+    if os.path.exists(path):
+        df = pd.read_csv(path, parse_dates=[date_col])
+        return df
+    else:
+        return pd.DataFrame()
+
+df_no2 = load_if_exists(NO2_CSV, "date")
+df_so2 = load_if_exists(SO2_CSV, "date")
+df_co  = load_if_exists(CO_CSV, "date")
+df_o3  = load_if_exists(O3_CSV, "date")
+df_pm  = df_aod_out.copy()  # contains PM2_5, PM10 and AOD
+
+print("Files present: ",
+      "NO2:", not df_no2.empty,
+      "SO2:", not df_so2.empty,
+      "CO:",  not df_co.empty,
+      "O3:",  not df_o3.empty,
+      "AOD/PM:", not df_pm.empty)
+
+# ---------- 4. Preprocess: make sure each df uses date column (datetime) and numeric pollutant column names standardized ----------
+def standardize(df, mapping=None):
+    if df.empty:
+        return df
+    df = df.copy()
+    # keep only first numeric column (if band is the name)
+    # unify to lowercase col names
+    df.columns = [c if c=="date" else c for c in df.columns]
+    return df
+
+dfs = {}
+if not df_no2.empty:
+    # sentinel NO2 band name may be "NO2_column_number_density" -> rename to NO2
+    cols = df_no2.columns.tolist()
+    # find numeric pollutant col
+    numcols = df_no2.select_dtypes(include=[float,int]).columns.tolist()
+    if len(numcols) == 1:
+        df_no2 = df_no2.rename(columns={numcols[0]:"NO2"})
+    elif "NO2" not in df_no2.columns:
+        # try to find a column containing 'no2'
+        for c in df_no2.columns:
+            if "no2" in c.lower():
+                df_no2 = df_no2.rename(columns={c:"NO2"})
+                break
+    dfs["NO2"] = df_no2[["date","NO2"]].copy()
+
+if not df_so2.empty:
+    numcols = df_so2.select_dtypes(include=[float,int]).columns.tolist()
+    if len(numcols)==1:
+        df_so2 = df_so2.rename(columns={numcols[0]:"SO2"})
+    else:
+        for c in df_so2.columns:
+            if "so2" in c.lower():
+                df_so2 = df_so2.rename(columns={c:"SO2"})
+                break
+    dfs["SO2"] = df_so2[["date","SO2"]].copy()
+
+if not df_co.empty:
+    numcols = df_co.select_dtypes(include=[float,int]).columns.tolist()
+    if len(numcols)==1:
+        df_co = df_co.rename(columns={numcols[0]:"CO"})
+    else:
+        for c in df_co.columns:
+            if "co" in c.lower():
+                df_co = df_co.rename(columns={c:"CO"})
+                break
+    dfs["CO"] = df_co[["date","CO"]].copy()
+
+if not df_o3.empty:
+    numcols = df_o3.select_dtypes(include=[float,int]).columns.tolist()
+    if len(numcols)==1:
+        df_o3 = df_o3.rename(columns={numcols[0]:"O3"})
+    else:
+        for c in df_o3.columns:
+            if "o3" in c.lower():
+                df_o3 = df_o3.rename(columns={c:"O3"})
+                break
+    dfs["O3"] = df_o3[["date","O3"]].copy()
+
+# AOD / PM
+dfs["PM"] = df_pm.rename(columns={"AOD":"AOD","PM2_5":"PM2_5","PM10":"PM10"})
+
+# ---------- 5. Create a master daily date index spanning min->max of available data ----------
+min_dates = []
+max_dates = []
+for k,df in dfs.items():
+    if not df.empty:
+        min_dates.append(df["date"].min())
+        max_dates.append(df["date"].max())
+if not min_dates:
+    raise RuntimeError("No data available to merge.")
+start = min(min_dates)
+end   = max(max_dates)
+date_index = pd.date_range(start=start, end=end, freq="D")
+master = pd.DataFrame({"date": date_index})
+
+# ---------- 6. Merge each source onto master and forward/backfill small gaps ----------
+for k,df in dfs.items():
+    if df.empty:
+        continue
+    # If df has monthly rows (like first of month), upsample to daily by forward-fill:
+    # first set index
+    df2 = df.copy()
+    df2 = df2.sort_values("date").drop_duplicates(subset=["date"])
+    df2 = df2.set_index("date")
+    # reindex to daily and forward-fill (and backward-fill to handle first few days)
+    df2 = df2.reindex(date_index)
+    df2 = df2.ffill().bfill()
+    df2 = df2.reset_index().rename(columns={"index":"date"})
+    # If df2 contains multiple columns (AOD, PM2_5, PM10), merge them all
+    master = master.merge(df2, on="date", how="left")
+
+# ---------- 7. Merge weather (3-hourly -> daily mean) if present ----------
+if os.path.exists(WEATHER_CSV):
+    df_w = pd.read_csv(WEATHER_CSV, parse_dates=["datetime"])
+    df_w["date"] = pd.to_datetime(df_w["datetime"]).dt.date
+    df_wd = df_w.groupby("date").agg({"temperature":"mean","humidity":"mean","wind_speed":"mean"}).reset_index()
+    df_wd["date"] = pd.to_datetime(df_wd["date"])
+    df_wd = df_wd.rename(columns={"temperature":"Temperature","humidity":"Humidity","wind_speed":"WindSpeed"})
+    # reindex to daily full index
+    df_wd2 = df_wd.set_index("date").reindex(date_index).ffill().bfill().reset_index().rename(columns={"index":"date"})
+    master = master.merge(df_wd2, on="date", how="left")
+else:
+    print("Weather CSV not found at", WEATHER_CSV)
+
+# ---------- 8. Final cleaning: numeric coercion and small gap fills ----------
+for c in master.columns:
+    if c!="date":
+        master[c] = pd.to_numeric(master[c], errors="coerce")
+master = master.sort_values("date").reset_index(drop=True)
+master.fillna(method="ffill", inplace=True)
+master.fillna(method="bfill", inplace=True)
+
+# ---------- 9. Optional: create scaled NO2 if you prefer (NO2 often scaled earlier ×1e6) ----------
+# If a NO2 column is in master and its mean is small (<1), preserve; if it's tiny like 5e-5 you may scale
+if "NO2" in master.columns:
+    if master["NO2"].abs().mean() < 0.01:
+        master["NO2_scaled"] = master["NO2"] * 1e6
+        print("Created NO2_scaled = NO2 * 1e6")
+
+# ---------- 10. Save final merged dataset ----------
+master.to_csv(OUT_MERGED, index=False)
+print("Saved merged processed dataset to:", OUT_MERGED)
+display(master.head(14))
