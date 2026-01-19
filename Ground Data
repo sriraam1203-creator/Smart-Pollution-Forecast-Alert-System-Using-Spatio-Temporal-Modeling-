@@ -1,0 +1,36 @@
+import requests
+import pandas as pd
+
+# 🔑 Insert your API key here
+API_KEY = "51e94c87a59994b92a38faed0d22a20cab6869169869de1c595409214d23dfd1"  
+
+# Add key to headers
+headers = {"X-API-Key": API_KEY}
+
+# OpenAQ v3 endpoint
+url = "https://api.openaq.org/v3/measurements"
+
+# Parameters for Vellore
+params = {
+    "coordinates": "12.9165,79.1325",  # Vellore lat, lon
+    "radius": 50000,                   # 50 km around Vellore
+    "limit": 100,
+    "parameter": ["pm25", "pm10", "no2", "so2", "co", "o3"],
+    "date_from": "2024-01-01T00:00:00+05:30",
+    "date_to": "2024-01-31T23:59:59+05:30",
+    "sort": "desc"
+}
+
+# Send request
+response = requests.get(url, headers=headers, params=params)
+data = response.json()
+
+# Check and save results
+if "results" in data:
+    df = pd.json_normalize(data["results"])
+    display(df.head())  # preview first rows
+    df.to_csv("../data/raw/ground/vellore_ground_raw.csv", index=False)
+    print("✅ Saved Vellore ground data to data/raw/ground/vellore_ground_raw.csv")
+else:
+    print("❌ No 'results' found. Response:", data)
+
