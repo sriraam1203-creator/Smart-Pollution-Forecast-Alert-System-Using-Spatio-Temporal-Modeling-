@@ -1,0 +1,219 @@
+import numpy as np
+import pandas as pd
+from tensorflow.keras.models import load_model
+import joblib
+from datetime import timedelta
+
+# ==========================
+# CONFIG
+# ==========================
+SEQ_LEN = 5
+FORECAST_DAYS = 30
+
+MODEL_PATH = "../models/lstm_multi_dailyAOD_safe.keras"
+INPUT_SCALER = "../models/scaler_inputs_multi_weather.pkl"
+TARGET_SCALER = "../models/scaler_targets_multi_weather.pkl"
+DATA_PATH = "../data/processed/vellore_final_dataset_with_weather.csv"
+
+TARGETS = ["NO2", "SO2", "CO", "O3", "PM2_5", "PM10"]
+
+FEATURE_COLS = [
+    "NO2","SO2","CO","O3","PM2_5","PM10",
+    "Temperature_x","Humidity_x","WindSpeed_x",
+    "SolarRadiation","Precipitation"
+]
+
+# ==========================
+# LOAD
+# ==========================
+df = pd.read_csv(DATA_PATH, parse_dates=["date"])
+df = df.sort_values("date").reset_index(drop=True)
+
+model = load_model(MODEL_PATH)
+scaler_X = joblib.load(INPUT_SCALER)
+scaler_Y = joblib.load(TARGET_SCALER)
+
+# ==========================
+# INITIAL SEQUENCE
+# ==========================
+last_seq = df[FEATURE_COLS].tail(SEQ_LEN).values
+last_seq_scaled = scaler_X.transform(
+    last_seq.reshape(-1, len(FEATURE_COLS))
+).reshape(1, SEQ_LEN, len(FEATURE_COLS))
+
+last_date = df["date"].iloc[-1]
+
+# ==========================
+# FORECAST LOOP
+# ==========================
+predictions = []
+dates = []
+
+current_seq = last_seq_scaled.copy()
+
+for i in range(FORECAST_DAYS):
+    y_scaled = model.predict(current_seq, verbose=0)
+
+    # inverse transform ALL targets together
+    y_pred = scaler_Y.inverse_transform(y_scaled)[0]
+
+    predictions.append(y_pred)
+    dates.append(last_date + timedelta(days=i+1))
+
+    # update next input (recursive)
+    next_row = current_seq[0, -1, :].copy()
+    next_row[:len(TARGETS)] = y_scaled[0]
+
+    current_seq = np.roll(current_seq, -1, axis=1)
+    current_seq[0, -1, :] = next_row
+
+# ==========================
+# SAVE OUTPUT
+# ==========================
+forecast_df = pd.DataFrame(predictions, columns=TARGETS)
+forecast_df.insert(0, "date", dates)
+
+out_path = "../data/outputs/vellore_forecast_multi_optionA.csv"
+forecast_df.to_csv(out_path, index=False)
+
+print("✅ STEP 4 COMPLETE — Forecast saved to:")
+print(out_path)
+display(forecast_df.head())
+import pandas as pd
+import numpy as np
+
+# Load August evaluation results (original units)
+eval_df = pd.read_csv("../data/outputs/august_eval_preds_multi_weather_orig.csv")
+TARGETS = ["NO2", "SO2", "CO", "O3", "PM2_5", "PM10"]
+
+residual_std = {}
+
+for p in TARGETS:
+    # find matching columns
+    true_col = [c for c in eval_df.columns if p in c and "pred" not in c.lower()][0]
+    pred_col = [c for c in eval_df.columns if p in c and "pred" in c.lower()][0]
+
+    residual = eval_df[true_col] - eval_df[pred_col]
+    residual_std[p] = residual.std()
+
+residual_std
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(15, 8))
+
+for p in TARGETS:
+    plt.plot(df_forecast["date"], df_forecast[p], label=f"{p} mean")
+    plt.fill_between(
+        df_forecast["date"],
+        df_forecast[f"{p}_lower"],
+        df_forecast[f"{p}_upper"],
+        alpha=0.2
+    )
+
+plt.title("Multi-Pollutant Forecast with Uncertainty (Vellore)")
+plt.xlabel("Date")
+plt.ylabel("Concentration")
+plt.legend()
+plt.grid(True)
+plt.show()
+import numpy as np
+
+# AQI category mapping
+def aqi_category(aqi):
+    if aqi <= 50:
+        return "Good"
+    elif aqi <= 100:
+        return "Satisfactory"
+    elif aqi <= 200:
+        return "Moderate"
+    elif aqi <= 300:
+        return "Poor"
+    elif aqi <= 400:
+        return "Very Poor"
+    else:
+        return "Severe"
+
+
+# Linear AQI sub-index formula
+def calc_sub_index(C, BP_lo, BP_hi, I_lo, I_hi):
+    return ((I_hi - I_lo)/(BP_hi - BP_lo)) * (C - BP_lo) + I_lo
+def pm25_aqi(pm):
+    if pm <= 30:
+        return calc_sub_index(pm, 0, 30, 0, 50)
+    elif pm <= 60:
+        return calc_sub_index(pm, 31, 60, 51, 100)
+    elif pm <= 90:
+        return calc_sub_index(pm, 61, 90, 101, 200)
+    elif pm <= 120:
+        return calc_sub_index(pm, 91, 120, 201, 300)
+    elif pm <= 250:
+        return calc_sub_index(pm, 121, 250, 301, 400)
+    else:
+        return 500
+def pm10_aqi(pm):
+    if pm <= 50:
+        return calc_sub_index(pm, 0, 50, 0, 50)
+    elif pm <= 100:
+        return calc_sub_index(pm, 51, 100, 51, 100)
+    elif pm <= 250:
+        return calc_sub_index(pm, 101, 250, 101, 200)
+    elif pm <= 350:
+        return calc_sub_index(pm, 251, 350, 201, 300)
+    elif pm <= 430:
+        return calc_sub_index(pm, 351, 430, 301, 400)
+    else:
+        return 500
+aqi_values = []
+
+for _, row in df_forecast.iterrows():
+    aqi_pm25 = pm25_aqi(row["PM2_5"])
+    aqi_pm10 = pm10_aqi(row["PM10"])
+    
+    final_aqi = max(aqi_pm25, aqi_pm10)
+    aqi_values.append(round(final_aqi))
+
+df_forecast["AQI"] = aqi_values
+df_forecast["AQI_Category"] = df_forecast["AQI"].apply(aqi_category)
+
+df_forecast.head()
+# CPCB AQI alert rules
+AQI_RULES = [
+    (0, 50, "Good", "No Alert", "Air quality is good. No health risk."),
+    (51, 100, "Satisfactory", "Mild Alert", "Minor breathing discomfort for sensitive people."),
+    (101, 200, "Moderate", "Health Alert", "People with lung/heart disease should limit outdoor activity."),
+    (201, 300, "Poor", "Pollution Alert", "Avoid prolonged outdoor exertion."),
+    (301, 400, "Very Poor", "Severe Alert", "Respiratory illness risk increases."),
+    (401, 500, "Severe", "Emergency Alert", "Serious health impacts. Stay indoors.")
+]
+def generate_aqi_alert(aqi):
+    for low, high, category, level, message in AQI_RULES:
+        if low <= aqi <= high:
+            return category, level, message
+    return "Unknown", "Unknown", "No data available"
+def dominant_pollutant(row):
+    pollutants = {
+        "PM2.5": row["PM2_5"],
+        "PM10": row["PM10"],
+        "NO2": row["NO2"],
+        "SO2": row["SO2"],
+        "CO": row["CO"],
+        "O3": row["O3"],
+    }
+    return max(pollutants, key=pollutants.get)
+alert_rows = []
+
+for _, row in df_forecast.iterrows():
+    category, level, message = generate_aqi_alert(row["AQI"])
+    
+    alert_rows.append({
+        "date": row["date"],
+        "AQI": row["AQI"],
+        "AQI_Category": category,
+        "Alert_Level": level,
+        "Dominant_Pollutant": dominant_pollutant(row),
+        "Health_Advisory": message
+    })
+
+df_alerts = pd.DataFrame(alert_rows)
+df_alerts.head()
+
